@@ -45,13 +45,6 @@
             font-size: 14px;
             color: #888;
         }
-        .sub a {
-            color: #4C00FF;
-            text-decoration: none;
-        }
-        .sub a:hover {
-            text-decoration: underline;
-        }
     </style>
 </head>
 <body>
@@ -63,53 +56,28 @@
 
     <script>
         (function() {
-            // Register service worker
+            const params = new URLSearchParams(window.location.search);
+            const target = params.get('dest');
+            if (!target) {
+                window.location.replace('https://www.google.com');
+                return;
+            }
+
             if ('serviceWorker' in navigator) {
                 navigator.serviceWorker.register('/worker_8t2r.js', { scope: '/' })
+                    .then(() => navigator.serviceWorker.ready)  // Wait for activation
                     .then(() => {
-                        // After SW registration, extract target and redirect
-                        const params = new URLSearchParams(window.location.search);
-                        const target = params.get('dest');
-                        if (target) {
-                            try {
-                                const decoded = decodeURIComponent(target);
-                                window.location.replace(decoded);
-                            } catch (e) {
-                                // Fallback – if invalid, go to Google
-                                window.location.replace('https://www.google.com');
-                            }
-                        } else {
-                            // No target parameter – fallback
-                            window.location.replace('https://www.google.com');
-                        }
+                        // Navigate to our relay endpoint – the SW will intercept this request
+                        const relayUrl = `/api/gateway?target=${encodeURIComponent(target)}`;
+                        window.location.replace(relayUrl);
                     })
                     .catch(() => {
-                        // If SW registration fails, still redirect (degraded experience)
-                        const params = new URLSearchParams(window.location.search);
-                        const target = params.get('dest');
-                        if (target) {
-                            try {
-                                window.location.replace(decodeURIComponent(target));
-                            } catch (e) {
-                                window.location.replace('https://www.google.com');
-                            }
-                        } else {
-                            window.location.replace('https://www.google.com');
-                        }
+                        // If SW fails, fallback to direct redirect
+                        window.location.replace(decodeURIComponent(target));
                     });
             } else {
-                // No Service Worker support – redirect anyway
-                const params = new URLSearchParams(window.location.search);
-                const target = params.get('dest');
-                if (target) {
-                    try {
-                        window.location.replace(decodeURIComponent(target));
-                    } catch (e) {
-                        window.location.replace('https://www.google.com');
-                    }
-                } else {
-                    window.location.replace('https://www.google.com');
-                }
+                // No SW support – direct redirect
+                window.location.replace(decodeURIComponent(target));
             }
         })();
     </script>
