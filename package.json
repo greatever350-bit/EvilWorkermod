@@ -1,0 +1,11 @@
+{
+  "name": "evilworker-final",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node proxy_server.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
