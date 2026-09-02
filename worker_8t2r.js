@@ -1,31 +1,21 @@
-self.addEventListener("fetch", (event) => {
-    event.respondWith(handleRequest(event.request));
+// worker_8t2r.js – Stealth Service Worker (No JSON envelope)
+self.addEventListener('fetch', (event) => {
+  event.respondWith(handleRequest(event.request));
 });
 
 async function handleRequest(request) {
-    const proxyRequestURL = `${self.location.origin}/lNv1pC9AWPUY4gbidyBO`;
-
-    try {
-        const proxyRequest = {
-            url: request.url,
-            method: request.method,
-            headers: Object.fromEntries(request.headers.entries()),
-            body: await request.text(),
-            referrer: request.referrer,
-            mode: request.mode
-        };
-        
-        return fetch(proxyRequestURL, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify(proxyRequest),
-            redirect: "manual",
-            mode: "same-origin"
-        });
-    }
-    catch (error) {
-        console.error(`Fetching ${proxyRequestURL} failed: ${error}`);
-    }
+  // Build relay URL with the target as a query param
+  const relayUrl = `/api/gateway?target=${encodeURIComponent(request.url)}`;
+  try {
+    // Forward the request exactly as-is, with original method, headers, body
+    return fetch(relayUrl, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+      redirect: 'manual',      // We control redirects server-side
+      mode: 'same-origin'
+    });
+  } catch (e) {
+    return new Response('Network error', { status: 502 });
+  }
 }
