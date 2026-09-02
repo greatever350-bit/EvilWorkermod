@@ -1,51 +1,55 @@
-const fs = require("fs");
-const crypto = require("crypto");
+// decrypt_log_file.js – Decrypt AES-256-CTR logs
+// Usage: node decrypt_log_file.js <log_file_path>
+// Environment: ENCRYPTION_KEY (must match proxy server key)
+import { readFileSync, existsSync } from 'fs';
+import { createDecipheriv } from 'crypto';
 
+// Read encryption key from environment (or fallback – never hardcode)
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
 
-//!\ It is strongly recommended to modify the encryption key and store it more securely for real engagements. /!\\
-const ENCRYPTION_KEY = "HyP3r-M3g4_S3cURe-EnC4YpT10n_k3Y";
-
-
-const clArguments = process.argv;
-if (clArguments.length !== 3) {
-    console.error(`/!\\ Usage: ${clArguments[0]} ${clArguments[1]} $ENCRYPTED_LOG_FILE_PATH /!\\`);
-    process.exit(1);
+if (!ENCRYPTION_KEY) {
+  console.error('Error: ENCRYPTION_KEY environment variable not set.');
+  process.exit(1);
 }
 
-const decryptedLogFile = decryptLogFile(clArguments[2]);
-console.log(decryptedLogFile);
-
-function decryptData(iv, encryptedData) {
-    try {
-        const decipher = crypto.createDecipheriv("aes-256-ctr", ENCRYPTION_KEY, Buffer.from(iv, "hex"));
-
-        let decryptedData = decipher.update(encryptedData, "hex", "utf-8");
-        decryptedData += decipher.final("utf-8");
-
-        return decryptedData;
-    }
-    catch (error) {
-        throw new Error(`Log file decryption failed: ${error.message}`);
-    }
+const args = process.argv;
+if (args.length !== 3) {
+  console.error(`Usage: ${args[0]} ${args[1]} <log_file_path>`);
+  process.exit(1);
 }
 
-function decryptLogFile(logFilePath) {
-    try {
-        if (!fs.existsSync(logFilePath)) {
-            throw new Error(`The ${logFilePath} file does not exist`);
-        }
-        const encryptedLogs = fs.readFileSync(logFilePath, "utf8").split("\n");
-        let decryptedData = "";
+const logFile = args[2];
+const decrypted = parseLogFile(logFile);
+console.log(decrypted);
 
-        for (const encryptedLog of encryptedLogs) {
-            if (!encryptedLog.trim()) continue;
-            const encryptedEntry = JSON.parse(encryptedLog);
-            const [[iv, encryptedData]] = Object.entries(encryptedEntry);
-            decryptedData += decryptData(iv, encryptedData);
-        }
-        return decryptedData;
-        
-    } catch (error) {
-        console.error(error);
+function decodeEntry(ivHex, dataHex) {
+  try {
+    const decipher = createDecipheriv('aes-256-ctr', ENCRYPTION_KEY, Buffer.from(ivHex, 'hex'));
+    let decrypted = decipher.update(dataHex, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (e) {
+    throw new Error(`Decryption failed: ${e.message}`);
+  }
+}
+
+function parseLogFile(filePath) {
+  try {
+    if (!existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
     }
+    const lines = readFileSync(filePath, 'utf8').split('\n').filter(line => line.trim());
+    let output = '';
+    for (const line of lines) {
+      const entry = JSON.parse(line);
+      // Each line is { iv: "hex", data: "hex" }
+      const entries = Object.entries(entry);
+      for (const [iv, encrypted] of entries) {
+        output += decodeEntry(iv, encrypted) + '\n';
+      }
+    }
+    return output;
+  } catch (e) {
+    console.error('Error:', e.message);
+  }
 }
